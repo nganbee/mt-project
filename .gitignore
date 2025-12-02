@@ -1,0 +1,6 @@
+.env
+.vscode
+data/
+debug_images/
+preprocess_json.ipynb
+test.ipynb
