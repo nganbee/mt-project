@@ -1,6 +1,6 @@
 .venv
 .vscode
+__pycahce__/
 data/
-debug_images/
-preprocess_json.ipynb
-test.ipynb
+Poppler/
+tessdata/
