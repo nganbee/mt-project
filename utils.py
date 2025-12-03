@@ -16,7 +16,7 @@ def is_cn_block(text):
     # Tỉ lệ chữ tiếng Trung > 20% tổng số -> là block tiếng Trung
     return (cn_chars / chars_count) > 0.5
 
-def ocr_layout(pil_img, paddle_ocr):
+def ocr_layout(pil_img, paddle_ocr, index):
     cn_text = ""
     vn_text = ""
     
@@ -24,7 +24,6 @@ def ocr_layout(pil_img, paddle_ocr):
     img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     
-    # Upscale 2 lần  
     #scaled = cv2.resize(img, None, fx=2, fy=2, interpolation= cv2.INTER_CUBIC)  # INTER_CUBIC giữ nét khi phóng to
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     
@@ -46,40 +45,48 @@ def ocr_layout(pil_img, paddle_ocr):
     
     final_result = ""
     
-    # Duyệt từng block và xử lý theo tiếng Trung - Viêt
-    
-    if not os.path.exists('debug_images'):
-        os.makedirs('debug_images')
-    
-    for i, (x,y,w,h) in enumerate(blocks):
+    # if not os.path.exists('debug_images'):
+    #     os.makedirs('debug_images')
         
-        h_img, w_img = gray.shape
+    h_img, w_img = img.shape[:2]
+    
+    # Duyệt từng block và xử lý theo tiếng Trung - Viêt
+    for i, (x,y,w,h) in enumerate(blocks):
         margin = 10
-        y_min, y_max = max(0, y-margin), min(h_img, y+h+margin)
+        y_min, y_max = max(0, y-(margin+5)), min(h_img, y+h+margin+5)
         x_min, x_max = max(0, x-margin), min(w_img, x+w+margin)
         
-        roi_gray = gray[y_min:y_max, x_min:x_max]
+        roi = img[y_min:y_max, x_min:x_max]
+        
+        if len(roi.shape) == 2:
+            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
+            
+        if roi.shape[0] < 40: 
+            roi = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+            
         #text_chi = pytesseract.image_to_string(roi, lang='chi_sim', config='--psm 6')
-        roi_color = cv2.cvtColor(roi_gray, cv2.COLOR_GRAY2BGR)
-        roi_padded = cv2.copyMakeBorder(roi_color, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
         
-        cv2.imwrite(f'debug_images/roi_block_{i}.jpg', roi_padded)
+        roi_padded = cv2.copyMakeBorder(roi, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
         
-        paddle_result = paddle_ocr.predict(roi_padded)
+        #cv2.imwrite(f'debug_images/roi_block_{index}_{i}.jpg', roi_padded)
+        
+        paddle_result = paddle_ocr.ocr(roi_padded)
         
         text_list = []
         
         for res in paddle_result:
             text_list.append(res['rec_texts'])  
             
-        with open("debug_text.txt", "a", encoding = 'utf-8') as f:
-            f.write(text_list)
+        # with open("debug_text.txt", "a", encoding = 'utf-8') as f:
+        #     f.write(str(text_list))
+        #     f.write("\n")
+            
         text_chi = "".join(text_list[0])
         
         if is_cn_block(text_chi):
             cn_text += text_chi.strip() + "\n"
         else:
-            text_vie = pytesseract.image_to_string(roi_gray, lang='vie', config='--psm 6')
+            text_vie = pytesseract.image_to_string(roi, lang='vie', config='--psm 6')
             vn_text += text_vie.strip() + "\n"
             
     return cn_text, vn_text
