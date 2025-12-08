@@ -175,3 +175,34 @@ def extract_cn_letters(raw_text):
         letters.append(full_letter)
         
     return letters
+
+
+def extract_letters_index(vi_letters, cn_letters, start_num, end_num):
+    
+    idx_start = -1
+    idx_end = -1
+    
+    for i, text in enumerate(vi_letters):
+        pattern = re.findall(r'\d+', text)
+        
+        if pattern:
+            current_num = int(pattern[-1])
+            if current_num == start_num:
+                idx_start = i
+                
+            if current_num == end_num:
+                idx_end = i
+                
+    if idx_start == -1 and idx_end == -1:
+        return
+    
+    list_id = list(range(start_num, end_num + 1))
+    
+    letters = {
+        "id": list_id,
+        "vi": vi_letters[idx_start : idx_end + 1],
+        "cn": cn_letters[idx_start : idx_end + 1],
+    }
+    
+    return letters   
+    
