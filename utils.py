@@ -131,28 +131,26 @@ def is_pinyin(text):
 
 def extract_vn_letters(raw_text):
     raw_text = unicodedata.normalize('NFC', raw_text)
-    
+    raw_text = raw_text.replace(r'\n', '\n')
     lines = raw_text.split('\n')
     letters = []
     current_letter = []
     is_recording = False
-    
-    # Đặt target để extract letter nếu ocr bị thiếu
-    target_letter = "bức thư gửi đến chính mình"
-    threshold = 90
-        
-    vn_char_pattern = r'[đươâêôăạảãậẩẫắằặẳẵệểễộổỗợởỡựửữỳýỵỷỹ]'
-    vn_keywords = [' là ', ' và ', ' của ', ' không ', ' có ', ' những ', ' người ', ' cho ', ' dù ', ' hâm ', ' mộ ']
 
-    pattern = r"(?i)^[\W_]*(bức\s+thư\s+){e<=1}"
+    vn_char_pattern = r'[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđĐ]'
+    vn_keywords = [' là ', ' và ', ' của ', ' không ', ' có ', ' những ', ' người ', ' cho ', ' dù ', ' hâm ', ' mộ ']
+    
+    pattern = r"(?i)(chính\s+mình\s+số\s+\d+){e<=2}"
 
     for line in lines:
         line = line.strip()
-        line = unicodedata.normalize('NFC', line)
-        if not line: continue
+        if not line : 
+            continue
+        
+        if line.isdigit():
+            continue
 
-        # 1. Bắt đầu ghi khi gặp "Bức thư"
-        #similarity_score = fuzz.partial_ratio(target_letter.lower(), line.lower())
+        # 1. Bắt đầu ghi khi gặp header patterns
         if regex.search(pattern, line):
             if current_letter: 
                 letters.append(" ".join(current_letter))
@@ -173,12 +171,10 @@ def extract_vn_letters(raw_text):
             is_vietnamese = True
         else:
             for word in vn_keywords:
-                if word in line.lower():
+                if re.search(r'\b' + re.escape(word) + r'\b', line.lower()):
                     is_vietnamese = True
                     break
-        
-        if line.isdigit(): is_vietnamese = False
-
+                
         if is_vietnamese:
             current_letter.append(line)
 
