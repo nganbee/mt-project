@@ -1,11 +1,11 @@
 import cv2
 import numpy as np
-from PIL import Image
-from pdf2image import convert_from_path
 import pytesseract
 import re
-import os
-from paddleocr import PaddleOCR
+import regex
+import unicodedata
+from collections import deque
+import pandas as pd
 
 def is_cn_block(text):
     # Đếm số lượng kí tự CN text
@@ -16,16 +16,42 @@ def is_cn_block(text):
     # Tỉ lệ chữ tiếng Trung > 20% tổng số -> là block tiếng Trung
     return (cn_chars / chars_count) > 0.5
 
+def preprocess_roi(roi_img):
+    if roi_img is None or roi_img.size == 0:
+        return None
+    
+    if len(roi_img.shape) == 3:
+        gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = roi_img
+    gray = gray.astype(np.uint8)
+
+    # Nếu ảnh nhỏ sẽ upscale
+    if gray.shape[0] < 40:
+        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+    # Shaperning
+    kernel = np.array([[-1, -1, -1], 
+                       [-1,  9, -1], 
+                       [-1, -1, -1]])
+    sharp = cv2.filter2D(gray, -1, kernel)
+    
+    denoised = cv2.fastNlMeansDenoising(sharp, None, 10, 7, 21)
+
+    return denoised
+
 def ocr_layout(pil_img, paddle_ocr, index):
     cn_text = ""
     vn_text = ""
     
     img = np.array(pil_img)
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    if len(img.shape) == 3 and img.shape[2] == 3: # Đảm bảo ảnh input đúng hệ màu
+         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     
-    #scaled = cv2.resize(img, None, fx=2, fy=2, interpolation= cv2.INTER_CUBIC)  # INTER_CUBIC giữ nét khi phóng to
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    #thresh_global = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
     
     # Tạo khối
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50,10))
@@ -43,50 +69,43 @@ def ocr_layout(pil_img, paddle_ocr, index):
     # Sort lại theo trục y
     blocks.sort(key = lambda x : x[1])
     
-    final_result = ""
-    
     # if not os.path.exists('debug_images'):
     #     os.makedirs('debug_images')
         
     h_img, w_img = img.shape[:2]
     
     # Duyệt từng block và xử lý theo tiếng Trung - Viêt
-    for i, (x,y,w,h) in enumerate(blocks):
+    for _, (x,y,w,h) in enumerate(blocks):
         margin = 10
         y_min, y_max = max(0, y-(margin+5)), min(h_img, y+h+margin+5)
         x_min, x_max = max(0, x-margin), min(w_img, x+w+margin)
         
         roi = img[y_min:y_max, x_min:x_max]
         
-        if len(roi.shape) == 2:
-            roi = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
-            
-        if roi.shape[0] < 40: 
-            roi = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-            
-        #text_chi = pytesseract.image_to_string(roi, lang='chi_sim', config='--psm 6')
+        if roi.size == 0 or roi.shape[0] == 0 or roi.shape[1] == 0:
+            continue
         
-        roi_padded = cv2.copyMakeBorder(roi, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        processed_roi = preprocess_roi(roi)
+        
+        # Padding
+        roi_padded = cv2.copyMakeBorder(processed_roi, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+        roi_input = cv2.cvtColor(roi_padded, cv2.COLOR_GRAY2BGR)
         
         #cv2.imwrite(f'debug_images/roi_block_{index}_{i}.jpg', roi_padded)
         
-        paddle_result = paddle_ocr.ocr(roi_padded)
+        paddle_result = paddle_ocr.ocr(roi_input)
         
         text_list = []
         
         for res in paddle_result:
             text_list.append(res['rec_texts'])  
             
-        # with open("debug_text.txt", "a", encoding = 'utf-8') as f:
-        #     f.write(str(text_list))
-        #     f.write("\n")
-            
         text_chi = "".join(text_list[0])
         
         if is_cn_block(text_chi):
             cn_text += text_chi.strip() + "\n"
         else:
-            text_vie = pytesseract.image_to_string(roi, lang='vie', config='--psm 6')
+            text_vie = pytesseract.image_to_string(processed_roi, lang='vie', config='--psm 6')
             vn_text += text_vie.strip() + "\n"
             
     return cn_text, vn_text
@@ -111,23 +130,35 @@ def is_pinyin(text):
 
 
 def extract_vn_letters(raw_text):
+    raw_text = unicodedata.normalize('NFC', raw_text)
+    
     lines = raw_text.split('\n')
     letters = []
     current_letter = []
     is_recording = False
     
+    # Đặt target để extract letter nếu ocr bị thiếu
+    target_letter = "bức thư gửi đến chính mình"
+    threshold = 90
+        
     vn_char_pattern = r'[đươâêôăạảãậẩẫắằặẳẵệểễộổỗợởỡựửữỳýỵỷỹ]'
     vn_keywords = [' là ', ' và ', ' của ', ' không ', ' có ', ' những ', ' người ', ' cho ', ' dù ', ' hâm ', ' mộ ']
 
+    pattern = r"(?i)^[\W_]*(bức\s+thư\s+){e<=1}"
+
     for line in lines:
         line = line.strip()
+        line = unicodedata.normalize('NFC', line)
         if not line: continue
 
         # 1. Bắt đầu ghi khi gặp "Bức thư"
-        if re.search(r"(?i)bức\s+thư", line):
+        #similarity_score = fuzz.partial_ratio(target_letter.lower(), line.lower())
+        if regex.search(pattern, line):
             if current_letter: 
                 letters.append(" ".join(current_letter))
-            current_letter = [line]
+                
+            clean_line = regex.sub(r"^[\W_]+", "", line)
+            current_letter = [clean_line]
             is_recording = True
             continue
 
@@ -156,7 +187,6 @@ def extract_vn_letters(raw_text):
 
 
 def extract_cn_letters(raw_text):
-    text = raw_text.replace(r'\n', '\n')
     letters = []
     
     # Header pattern
@@ -177,32 +207,58 @@ def extract_cn_letters(raw_text):
     return letters
 
 
+
+
 def extract_letters_index(vi_letters, cn_letters, start_num, end_num):
     
-    idx_start = -1
-    idx_end = -1
-    
-    for i, text in enumerate(vi_letters):
-        pattern = re.findall(r'\d+', text)
+    def get_clean_list(text_list):
+        # Gom nhóm dữ liệu
+        raw_map = {}
+        for text in text_list:
+            matches = re.findall(r'\d+', text)
+            if matches:
+                curr_id = int(matches[0])
+                if curr_id not in raw_map:
+                    raw_map[curr_id] = []
+                raw_map[curr_id].append(text)
         
-        if pattern:
-            current_num = int(pattern[-1])
-            if current_num == start_num:
-                idx_start = i
+        cleaned_result = {}
+        overflow_queue = deque() # Hàng đợi chứa các dòng bị thừa
+        
+        for i in range(start_num, end_num + 1):
+            candidates = raw_map.get(i, [])
+            
+            final_text = ""
+            
+            # Lấy dữ liệu tại chỗ
+            if candidates:
+                final_text = candidates[0] # Lấy cái đầu tiên
                 
-            if current_num == end_num:
-                idx_end = i
+                # Nếu thừa -> đưa vào hàng
+                if len(candidates) > 1:
+                    for extra in candidates[1:]:
+                        overflow_queue.append(extra)
+            
+            # Nếu rỗng sẽ điền trống
+            if not final_text and overflow_queue:
+
+                final_text = overflow_queue.popleft() 
                 
-    if idx_start == -1 and idx_end == -1:
-        return
+            cleaned_result[i] = final_text
+            
+        return cleaned_result
+
+
+    dict_vi = get_clean_list(vi_letters)
+    dict_cn = get_clean_list(cn_letters)
     
-    list_id = list(range(start_num, end_num + 1))
-    
-    letters = {
-        "id": list_id,
-        "vi": vi_letters[idx_start : idx_end + 1],
-        "cn": cn_letters[idx_start : idx_end + 1],
-    }
-    
-    return letters   
+    rows = []
+    for i in range(start_num, end_num + 1):
+        rows.append({
+            "id": i,
+            "vi": dict_vi.get(i, ""),
+            "cn": dict_cn.get(i, "")
+        })
+        
+    return pd.DataFrame(rows) 
     
