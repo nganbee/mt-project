@@ -25,22 +25,27 @@ def preprocess_roi(roi_img):
     else:
         gray = roi_img
     gray = gray.astype(np.uint8)
+    
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    gamma = 0.8
+    lookUpTable = np.empty((1,256), np.uint8)
+    for i in range(256):
+        lookUpTable[0,i] = np.clip(pow(i / 255.0, gamma) * 255.0, 0, 255)
+    enhanced = cv2.LUT(enhanced, lookUpTable)
 
     # Nếu ảnh nhỏ sẽ upscale
-    if gray.shape[0] < 40:
-        gray = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+    if enhanced.shape[0] < 50:
+        enhanced = cv2.resize(enhanced, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_LANCZOS4)
 
-    # Shaperning
-    kernel = np.array([[-1, -1, -1], 
-                       [-1,  9, -1], 
-                       [-1, -1, -1]])
-    sharp = cv2.filter2D(gray, -1, kernel)
+    pad = 10
+    padded = cv2.copyMakeBorder(gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255)
     
-    denoised = cv2.fastNlMeansDenoising(sharp, None, 10, 7, 21)
+    img_bgr = cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+    return img_bgr
 
-    return denoised
-
-def ocr_layout(pil_img, paddle_ocr, index):
+def ocr_layout(pil_img, cn_ocr, index):
     cn_text = ""
     vn_text = ""
     
@@ -48,10 +53,12 @@ def ocr_layout(pil_img, paddle_ocr, index):
     if len(img.shape) == 3 and img.shape[2] == 3: # Đảm bảo ảnh input đúng hệ màu
          img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    #thresh_global = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    
+    #_, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 4)
     
     # Tạo khối
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50,10))
@@ -75,7 +82,7 @@ def ocr_layout(pil_img, paddle_ocr, index):
     h_img, w_img = img.shape[:2]
     
     # Duyệt từng block và xử lý theo tiếng Trung - Viêt
-    for _, (x,y,w,h) in enumerate(blocks):
+    for i, (x,y,w,h) in enumerate(blocks):
         margin = 10
         y_min, y_max = max(0, y-(margin+5)), min(h_img, y+h+margin+5)
         x_min, x_max = max(0, x-margin), min(w_img, x+w+margin)
@@ -87,17 +94,13 @@ def ocr_layout(pil_img, paddle_ocr, index):
         
         processed_roi = preprocess_roi(roi)
         
-        # Padding
-        roi_padded = cv2.copyMakeBorder(processed_roi, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-        roi_input = cv2.cvtColor(roi_padded, cv2.COLOR_GRAY2BGR)
+        #cv2.imwrite(f'debug_images/roi_block_{index}_{i}.jpg', processed_roi)
         
-        #cv2.imwrite(f'debug_images/roi_block_{index}_{i}.jpg', roi_padded)
-        
-        paddle_result = paddle_ocr.ocr(roi_input)
+        ocr_results = cn_ocr.ocr(processed_roi)
         
         text_list = []
         
-        for res in paddle_result:
+        for res in ocr_results:
             text_list.append(res['rec_texts'])  
             
         text_chi = "".join(text_list[0])
@@ -113,17 +116,15 @@ def ocr_layout(pil_img, paddle_ocr, index):
 
 def is_pinyin(text):
     text = text.lower().strip()
+    
+    pattern = r"[jzwf]"
 
-    # Nếu có z trong câu -> từ pinyin
-    if 'z' in text:
+    # Nếu có j,z,w,f trong câu -> từ pinyin
+    if re.search(pattern, text, re.IGNORECASE):
         return True
 
-    alien_chars = r'[öäüāēīōūǖǎǒǐǔ]'
+    alien_chars = r'[öäüāēīōūǖǎǒǐǔðăï]'
     if re.search(alien_chars, text):
-        return True
-
-    # Kết thúc bằng j, z hoặc bắt đầu bằng f, w, z, j -> là từ pinyin
-    if re.search(r'\b\w*[jz]\b', text) or re.search(r'\b[jfwz]\w*\b', text):
         return True
     
     return False
@@ -202,9 +203,6 @@ def extract_cn_letters(raw_text):
         
     return letters
 
-
-
-
 def extract_letters_index(vi_letters, cn_letters, start_num, end_num):
     
     def get_clean_list(text_list):
@@ -256,5 +254,5 @@ def extract_letters_index(vi_letters, cn_letters, start_num, end_num):
             "cn": dict_cn.get(i, "")
         })
         
-    return pd.DataFrame(rows) 
+    return pd.DataFrame(rows)
     
